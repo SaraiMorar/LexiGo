@@ -114,6 +114,8 @@ def api_rate():
 
 def _phrase_payload(data) -> dict:
     """从请求体提取并校验词组字段。"""
+    if not isinstance(data, dict):
+        return None
     en = (data.get("en") or "").strip()
     zh = (data.get("zh") or "").strip()
     if not en or not zh:
@@ -142,6 +144,21 @@ def api_tags():
 @app.get("/api/batches")
 def api_batches():
     return jsonify({"batches": models.list_batches()})
+
+
+@app.put("/api/batches/<int:batch_id>")
+def api_batch_rename(batch_id: int):
+    data = request.get_json(silent=True) or {}
+    name = str(data.get("name") or "").strip() if isinstance(data, dict) else ""
+    if not name or len(name) > 100:
+        return jsonify({"error": "批次名称应为 1–100 个字符"}), 400
+    try:
+        renamed = models.rename_batch(batch_id, name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not renamed:
+        return jsonify({"error": "批次不存在"}), 404
+    return jsonify({"id": batch_id, "name": name})
 
 
 @app.post("/api/batches/<int:batch_id>/order-mode")
@@ -183,6 +200,11 @@ def api_phrases():
         per_page = min(100, max(5, int(request.args.get("per_page", 20))))
     except (TypeError, ValueError):
         page, per_page = 1, 20
+    raw_batch = request.args.get("batch_id", "")
+    try:
+        batch_id = int(raw_batch) if raw_batch else None
+    except ValueError:
+        return jsonify({"error": "批次格式不正确"}), 400
     result = models.list_phrases(
         query=request.args.get("q", "").strip(),
         tag=request.args.get("tag", "").strip(),
@@ -190,6 +212,8 @@ def api_phrases():
         state=request.args.get("state", "").strip(),
         page=page,
         per_page=per_page,
+        batch_id=batch_id,
+        sort=request.args.get("sort", "added"),
     )
     return jsonify(result)
 
@@ -200,29 +224,39 @@ def api_phrases_create():
     payload = _phrase_payload(data)
     if payload is None:
         return jsonify({"error": "英文和中文不能为空"}), 400
-    # 批次归属：指定则加入，否则新建一个批次
+    # 批次和词条一起保存，重复词不会留下空批次。
     try:
         batch_id = int(data.get("batch_id")) if data.get("batch_id") else None
     except (TypeError, ValueError):
-        batch_id = None
-    if batch_id is None:
-        batch_id = models.create_batch(models.next_batch_name())
+        return jsonify({"error": "批次格式不正确"}), 400
     payload["batch_id"] = batch_id
+    if "batch_name" in data:
+        name = str(data["batch_name"] or "").strip()
+        if not name or len(name) > 100:
+            return jsonify({"error": "请填写批次名称（1–100 个字符）"}), 400
+        payload["batch_name"] = name
     try:
         phrase_id, existed = models.add_phrase_full(**payload)
     except Exception as exc:  # 重复 en 等
         return jsonify({"error": f"保存失败：{exc}"}), 400
-    return jsonify({"id": phrase_id, "existed": existed,
-                    "batch_id": batch_id}), 200
+    return jsonify({"id": phrase_id, "existed": existed}), 200
 
 
 @app.put("/api/phrases/<int:phrase_id>")
 def api_phrases_update(phrase_id: int):
-    payload = _phrase_payload(request.get_json(force=True))
+    data = request.get_json(force=True)
+    payload = _phrase_payload(data)
     if payload is None:
         return jsonify({"error": "英文和中文不能为空"}), 400
+    if "batch_id" in data:
+        try:
+            payload["batch_id"] = int(data["batch_id"]) if data["batch_id"] is not None else None
+        except (TypeError, ValueError):
+            return jsonify({"error": "批次格式不正确"}), 400
     try:
         models.update_phrase(phrase_id, payload)
+    except LookupError as exc:
+        return jsonify({"error": str(exc)}), 404
     except Exception as exc:
         return jsonify({"error": f"更新失败：{exc}"}), 400
     return jsonify({"id": phrase_id})
@@ -254,11 +288,13 @@ def api_export_csv():
     result = models.list_phrases(page=1, per_page=100000)
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["item_type", "en", "zh", "phonetic", "pos", "tag", "note"])
+    writer.writerow(["item_type", "en", "zh", "phonetic", "pos", "tag", "note",
+                     "batch_name", "order_mode"])
     for p in result["items"]:
         writer.writerow(
             [p["item_type"], p["en"], p["zh"], p["phonetic"] or "",
-             p["pos"] or "", p["tag"] or "", p["note"] or ""]
+             p["pos"] or "", p["tag"] or "", p["note"] or "",
+             p["batch_name"] or "", p["order_mode"] or config.ORDER_SEQUENCE]
         )
     return Response(
         "\ufeff" + buf.getvalue(),

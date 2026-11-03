@@ -80,6 +80,15 @@
       <h2 class="view-title">词库管理</h2>
       <div class="toolbar">
         <input id="lib-search" class="lib-input" placeholder="搜索英文 / 中文 / 备注" />
+        <select id="lib-batch" class="lib-select" aria-label="按批次筛选">
+          <option value="">全部批次</option>
+        </select>
+        <button id="btn-rename-batch" class="btn-small" disabled>重命名批次</button>
+        <select id="lib-sort" class="lib-select" aria-label="词库排序">
+          <option value="added">录入顺序</option>
+          <option value="en">英文 A–Z</option>
+          <option value="type">按类型排序</option>
+        </select>
         <select id="lib-tag" class="lib-select">
           <option value="">全部标签</option>
         </select>
@@ -106,7 +115,7 @@
         <table class="phrase-table">
           <thead>
             <tr>
-              <th>类型</th><th>英文</th><th>中文</th><th>标签</th>
+              <th>类型</th><th>英文</th><th>中文</th><th>批次</th><th>标签</th>
               <th>状态</th><th>操作</th>
             </tr>
           </thead>
@@ -260,8 +269,11 @@
       <div class="form-row">
         <label>批次</label>
         <select id="f-batch">
-          <option value="">（新建批次）</option>
+          <option value="">（沿用最近批次）</option>
         </select>
+      </div>
+      <div id="new-batch-row" class="form-row hidden">
+        <label>新批次名称</label><input id="f-batch-name" maxlength="100" placeholder="如 高频动词搭配" />
       </div>
       <div class="form-row"><label>英文</label><input id="f-en" /></div>
       <div class="form-row"><label>中文</label><input id="f-zh" /></div>

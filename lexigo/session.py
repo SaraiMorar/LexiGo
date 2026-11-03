@@ -224,7 +224,9 @@ class StudySession:
         }
 
     def rate(self, rating: int, elapsed_ms: int, today: date) -> dict:
+        self._advance()
         if self.stage == STAGE_DONE:
+            self.save()
             return {"done": True, "summary": self._summary()}
 
         card_id = self.queue[0]

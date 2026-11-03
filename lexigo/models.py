@@ -1,6 +1,7 @@
 """数据访问层：词组、卡片、复习记录的操作与统计。"""
 
 import random
+import json
 from datetime import date, timedelta
 
 from . import config
@@ -113,6 +114,15 @@ def set_batch_order_mode(batch_id: int, order_mode: str) -> bool:
         return cur.rowcount > 0
 
 
+def rename_batch(batch_id: int, name: str) -> bool:
+    with get_conn() as conn:
+        if conn.execute("SELECT 1 FROM batches WHERE name = ? AND id != ?", (name, batch_id)).fetchone():
+            raise ValueError("已存在同名批次，请使用不同名称")
+        return conn.execute(
+            "UPDATE batches SET name = ? WHERE id = ?", (name, batch_id)
+        ).rowcount > 0
+
+
 # ---------- 词组 ----------
 
 def insert_phrase(en: str, zh: str, note: str = "", tag: str = "",
@@ -138,7 +148,8 @@ def insert_phrase(en: str, zh: str, note: str = "", tag: str = "",
 def add_phrase_full(en: str, zh: str, note: str = "", tag: str = "",
                     item_type: str = config.TYPE_PHRASE,
                     phonetic: str = "", pos: str = "",
-                    batch_id: int | None = None) -> int:
+                    batch_id: int | None = None,
+                    batch_name: str | None = None) -> tuple[int, bool]:
     """网页端加词：插入词组并创建双向卡片，返回 (phrase_id, already_exists)。"""
     with get_conn() as conn:
         existing = conn.execute(
@@ -146,6 +157,22 @@ def add_phrase_full(en: str, zh: str, note: str = "", tag: str = "",
         ).fetchone()
         if existing:
             return existing["id"], True
+        if batch_name is not None:
+            if conn.execute("SELECT 1 FROM batches WHERE name = ?", (batch_name,)).fetchone():
+                raise ValueError("已存在同名批次，请直接选择该批次")
+            batch_id = conn.execute(
+                "INSERT INTO batches (name) VALUES (?)", (batch_name,)
+            ).lastrowid
+        elif batch_id is not None:
+            if not conn.execute("SELECT 1 FROM batches WHERE id = ?", (batch_id,)).fetchone():
+                raise ValueError("批次不存在")
+        else:
+            # 未指定时沿用最近一个批次，不为每个单词生成新批次。
+            batch = conn.execute("SELECT id FROM batches ORDER BY id DESC LIMIT 1").fetchone()
+            batch_id = batch["id"] if batch else conn.execute(
+                "INSERT INTO batches (name) VALUES ('第 1 批')"
+            ).lastrowid
+        conn.execute("DELETE FROM deleted_phrases WHERE en = ?", (en,))
         cur = conn.execute(
             """INSERT INTO phrases (en, zh, note, tag, item_type, phonetic,
                                     pos, batch_id)
@@ -174,12 +201,43 @@ def update_phrase(phrase_id: int, fields: dict):
         return
     params.append(phrase_id)
     with get_conn() as conn:
+        previous = conn.execute("SELECT en FROM phrases WHERE id = ?", (phrase_id,)).fetchone()
+        if previous is None:
+            raise LookupError("词条不存在")
+        if fields.get("batch_id") is not None and not conn.execute(
+            "SELECT 1 FROM batches WHERE id = ?", (fields["batch_id"],)
+        ).fetchone():
+            raise ValueError("批次不存在")
         conn.execute(f"UPDATE phrases SET {', '.join(sets)} WHERE id = ?", params)
+        if "en" in fields and fields["en"] != previous["en"]:
+            conn.execute("INSERT OR IGNORE INTO deleted_phrases (en) VALUES (?)", (previous["en"],))
+            conn.execute("DELETE FROM deleted_phrases WHERE en = ?", (fields["en"],))
 
 
 def delete_phrase(phrase_id: int):
     """删除词组及其卡片、复习记录。"""
     with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO deleted_phrases (en) SELECT en FROM phrases WHERE id = ?",
+            (phrase_id,),
+        )
+        # 正在学习时删除词条，也要清掉断点中对应的卡片，避免继续时访问空卡片。
+        ids = {r["id"] for r in conn.execute("SELECT id FROM cards WHERE phrase_id = ?", (phrase_id,))}
+        session = conn.execute("SELECT * FROM session_state WHERE id = 1").fetchone()
+        if session and ids:
+            queues = {key: [i for i in json.loads(session[key]) if i not in ids]
+                      for key in ("queue", "pending")}
+            snapshots = {key: {direction: [i for i in cards if i not in ids]
+                              for direction, cards in json.loads(session[key]).items()}
+                         for key in ("new_cards", "review_cards")}
+            counts = [max(0, session[count] - int(any(
+                i in ids for cards in json.loads(session[key]).values() for i in cards
+            ))) for key, count in (("new_cards", "new_count"), ("review_cards", "review_count"))]
+            conn.execute(
+                "UPDATE session_state SET queue=?, pending=?, new_cards=?, review_cards=?, "
+                "new_count=?, review_count=? WHERE id=1",
+                (*[json.dumps(value) for value in (*queues.values(), *snapshots.values())], *counts),
+            )
         conn.execute(
             "DELETE FROM review_logs WHERE phrase_id = ?", (phrase_id,)
         )
@@ -245,9 +303,15 @@ END
 
 
 def list_phrases(query: str = "", tag: str = "", item_type: str = "",
-                 state: str = "", page: int = 1, per_page: int = 20) -> dict:
+                 state: str = "", page: int = 1, per_page: int = 20,
+                 batch_id: int | None = None, sort: str = "added") -> dict:
     """分页列出词组，支持搜索与筛选。"""
     where, params = [], []
+    if batch_id is not None:
+        where.append("p.batch_id = ?")
+        params.append(batch_id)
+    order = {"added": "p.id", "en": "p.en COLLATE NOCASE, p.id",
+             "type": "p.item_type, p.en COLLATE NOCASE, p.id"}.get(sort, "p.id")
     if query:
         like = f"%{query}%"
         where.append("(p.en LIKE ? OR p.zh LIKE ? OR p.note LIKE ?)")
@@ -281,13 +345,15 @@ def list_phrases(query: str = "", tag: str = "", item_type: str = "",
         rows = conn.execute(
             f"""
             SELECT p.id, p.en, p.zh, p.note, p.tag, p.item_type,
-                   p.phonetic, p.pos,
+                   p.phonetic, p.pos, p.batch_id,
+                   (SELECT name FROM batches WHERE id = p.batch_id) AS batch_name,
+                   (SELECT order_mode FROM batches WHERE id = p.batch_id) AS order_mode,
                    {_STATE_CODE} AS agg_state,
                    MAX(c.lapses) AS max_lapses,
                    MIN(c.ease) AS min_ease,
                    MAX(c.interval_days) AS max_interval
             {base_select}
-            ORDER BY p.id
+            ORDER BY {order}
             LIMIT ? OFFSET ?
             """,
             params + [per_page, (page - 1) * per_page],

@@ -7,6 +7,15 @@ from . import config
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS csv_import_state (
+    en TEXT PRIMARY KEY,
+    payload TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS deleted_phrases (
+    en TEXT PRIMARY KEY
+);
+
 CREATE TABLE IF NOT EXISTS batches (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,

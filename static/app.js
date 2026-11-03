@@ -306,7 +306,7 @@ function renderFinish(s) {
 
 // ---------- 词库管理 ----------
 
-const lib = { page: 1, q: "", tag: "", type: "", state: "" };
+const lib = { page: 1, q: "", tag: "", type: "", state: "", batch: "", sort: "added" };
 let lastItems = [];
 
 async function loadTagOptions() {
@@ -322,6 +322,11 @@ async function loadTagOptions() {
 
 async function loadLibrary() {
   await loadTagOptions();
+  const batches = await (await fetch("/api/batches")).json();
+  document.getElementById("lib-batch").innerHTML = '<option value="">全部批次</option>' +
+    batches.batches.map((b) => `<option value="${b.id}">${escapeHtml(b.name)}（${b.total}）</option>`).join("");
+  document.getElementById("lib-batch").value = lib.batch;
+  document.getElementById("btn-rename-batch").disabled = !lib.batch;
   const params = new URLSearchParams({
     page: lib.page,
     per_page: 15,
@@ -329,6 +334,8 @@ async function loadLibrary() {
     tag: lib.tag,
     type: lib.type,
     state: lib.state,
+    batch_id: lib.batch,
+    sort: lib.sort,
   });
   const r = await (await fetch("/api/phrases?" + params)).json();
   lastItems = r.items;
@@ -339,13 +346,14 @@ function renderLibrary(r) {
   const tbody = document.getElementById("lib-tbody");
   if (r.items.length === 0) {
     tbody.innerHTML =
-      '<tr><td colspan="6" style="text-align:center;color:var(--ink-soft)">没有符合条件的词</td></tr>';
+      '<tr><td colspan="7" style="text-align:center;color:var(--ink-soft)">没有符合条件的词</td></tr>';
   } else {
     tbody.innerHTML = r.items.map((p) => `
       <tr>
         <td>${TYPE_LABEL[p.item_type] || p.item_type}</td>
         <td class="en-cell">${escapeHtml(p.en)}</td>
         <td class="zh-cell">${escapeHtml(p.zh)}</td>
+        <td>${escapeHtml(p.batch_name || "未分组")}</td>
         <td class="tag-cell">${escapeHtml(p.tag || "")}</td>
         <td><span class="state-pill state-${p.agg_state}">${
           STATE_LABEL[p.agg_state] || p.agg_state
@@ -375,7 +383,7 @@ document.getElementById("lib-tbody").addEventListener("click", async (e) => {
   if (act === "edit") {
     openEditModal(id);
   } else if (act === "delete") {
-    const p = lastItems.find((x) => x.id === id);
+    const p = lastItems.find((x) => String(x.id) === id);
     if (confirm(`确定删除「${p.en}」？其卡片和复习记录将一并删除。`)) {
       await fetch(`/api/phrases/${id}`, { method: "DELETE" });
       loadLibrary();
@@ -407,7 +415,7 @@ document.getElementById("lib-search").addEventListener("input", (e) => {
     loadLibrary();
   }, 300);
 });
-["lib-tag", "lib-type", "lib-state"].forEach((id) => {
+["lib-tag", "lib-type", "lib-state", "lib-batch", "lib-sort"].forEach((id) => {
   document.getElementById(id).addEventListener("change", (e) => {
     lib[id.split("-")[1]] = e.target.value;
     lib.page = 1;
@@ -416,6 +424,22 @@ document.getElementById("lib-search").addEventListener("input", (e) => {
 });
 
 // ---------- 弹窗 ----------
+
+document.getElementById("btn-rename-batch").addEventListener("click", async () => {
+  if (!lib.batch) return;
+  const name = prompt("输入新的批次名称：");
+  if (!name || !name.trim()) return;
+  const res = await fetch(`/api/batches/${lib.batch}`, {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: name.trim() }),
+  });
+  if (!res.ok) {
+    const data = await res.json();
+    alert(data.error || "重命名失败");
+    return;
+  }
+  await loadLibrary();
+});
 
 const modal = document.getElementById("modal");
 let editingId = null;
@@ -433,12 +457,18 @@ function toggleWordFields() {
 async function loadBatchOptions(selectedId) {
   const r = await (await fetch("/api/batches")).json();
   const sel = document.getElementById("f-batch");
-  sel.innerHTML = '<option value="">（新建批次）</option>' +
+  sel.innerHTML = `<option value="">${editingId ? "（未分组）" : "（沿用最近批次）"}</option>` +
     r.batches.map((b) =>
       `<option value="${b.id}">${escapeHtml(b.name)}（${b.done}/${b.total}）</option>`
-    ).join("");
+    ).join("") + (editingId ? "" : '<option value="new">＋ 新建批次…</option>');
   sel.value = selectedId == null ? "" : String(selectedId);
+  document.getElementById("f-batch-name").value = "";
+  document.getElementById("new-batch-row").classList.add("hidden");
 }
+
+document.getElementById("f-batch").addEventListener("change", (e) => {
+  document.getElementById("new-batch-row").classList.toggle("hidden", e.target.value !== "new");
+});
 
 async function openAddModal() {
   editingId = null;
@@ -447,13 +477,13 @@ async function openAddModal() {
   ["f-en", "f-zh", "f-phonetic", "f-pos", "f-tag", "f-note"].forEach((id) => {
     document.getElementById(id).value = "";
   });
-  await loadBatchOptions("");
+  await loadBatchOptions(lib.batch);
   toggleWordFields();
   showModal();
 }
 
 async function openEditModal(id) {
-  const p = lastItems.find((x) => x.id === id);
+  const p = lastItems.find((x) => String(x.id) === String(id));
   if (!p) return;
   editingId = id;
   document.getElementById("modal-title").textContent = "编辑词条";
@@ -487,7 +517,14 @@ document.getElementById("modal-save").addEventListener("click", async () => {
     tag: document.getElementById("f-tag").value.trim(),
     note: document.getElementById("f-note").value.trim(),
   };
-  if (batchVal) payload.batch_id = parseInt(batchVal, 10);
+  if (batchVal === "new") {
+    payload.batch_name = document.getElementById("f-batch-name").value.trim();
+    if (!payload.batch_name) { alert("请填写新批次名称"); return; }
+  } else if (batchVal) {
+    payload.batch_id = parseInt(batchVal, 10);
+  } else if (editingId) {
+    payload.batch_id = null;
+  }
   const url = editingId ? `/api/phrases/${editingId}` : "/api/phrases";
   const method = editingId ? "PUT" : "POST";
   const res = await fetch(url, {
@@ -496,6 +533,8 @@ document.getElementById("modal-save").addEventListener("click", async () => {
     body: JSON.stringify(payload),
   });
   if (res.ok) {
+    const data = await res.json();
+    if (data.existed) { alert("这个词已存在，未重复添加。"); return; }
     hideModal();
     loadLibrary();
   } else {
