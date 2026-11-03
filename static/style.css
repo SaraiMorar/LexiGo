@@ -64,7 +64,7 @@ body {
 }
 
 .container {
-  max-width: 760px;
+  max-width: 1600px;
   margin: 0 auto;
   padding: 32px 20px 60px;
 }
@@ -91,6 +91,8 @@ body {
 :root[data-theme="dark"] .theme-toggle .icon-sun { display: block; }
 :root[data-theme="dark"] .theme-toggle .icon-moon { display: none; }
 
+.view { max-width: 720px; margin-inline: auto; }
+#view-home { max-width: none; }
 .view.hidden { display: none; }
 
 /* ---------- 首页 ---------- */
@@ -126,7 +128,8 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
-  margin-bottom: 28px;
+  max-width: 720px;
+  margin: 0 auto 28px;
 }
 .task-card {
   background: var(--card);
@@ -168,7 +171,7 @@ body {
 /* 批次进度 */
 .batch-progress {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -180,15 +183,38 @@ body {
 }
 .batch-head {
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
+  gap: 6px;
+  align-items: center;
   margin-bottom: 8px;
 }
-.batch-name { font-weight: 600; font-size: 14px; min-width: 0; }
+.batch-name {
+  font-weight: 600;
+  font-size: 14px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.batch-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: var(--ink-soft);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.batch-rename:hover { color: var(--teal); background: var(--teal-soft); }
+.batch-rename:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.batch-rename:disabled { opacity: 0.5; cursor: wait; }
+.batch-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
 .batch-count { font-size: 13px; color: var(--ink-soft); flex-shrink: 0; margin-left: 8px; }
 .order-toggle {
   flex-shrink: 0;
-  margin-left: auto;
   padding: 2px 10px;
   font-size: 11px;
   font-weight: 600;

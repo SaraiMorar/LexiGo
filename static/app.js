@@ -101,7 +101,15 @@ function renderBatchProgress(batches) {
     return `
       <div class="${cls}" data-batch-id="${b.id}" title="${hint}">
         <div class="batch-head">
-          <span class="batch-name">${escapeHtml(b.name)}</span>
+          <span class="batch-name" title="${escapeHtml(b.name)}">${escapeHtml(b.name)}</span>
+          <button type="button" class="batch-rename" title="重命名批次" aria-label="重命名批次：${escapeHtml(b.name)}">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+              stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="m16 3 5 5M3 21l5-1L21 7a2.1 2.1 0 0 0-5-5L3 15Z" />
+            </svg>
+          </button>
+        </div>
+        <div class="batch-meta">
           <button class="order-toggle" data-order-mode="${mode}"
             title="点击切换背诵顺序：正序 → 乱序 → 倒序">${ORDER_LABEL[mode] || "正序"}</button>
           <span class="batch-count">${b.done} / ${b.total}</span>
@@ -111,8 +119,44 @@ function renderBatchProgress(batches) {
   }).join("");
 }
 
-// 批次网格点击：切换顺序按钮 或 进入该批次学习（事件委托，兼容动态渲染）
+async function renameBatch(batchId, currentName) {
+  const input = prompt("输入新的批次名称：", currentName);
+  if (input === null) return false;
+  const name = input.trim();
+  if (!name || name.length > 100) { alert("批次名称应为 1–100 个字符"); return false; }
+  if (name === currentName) return false;
+  try {
+    const res = await fetch(`/api/batches/${batchId}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || "重命名失败"); return false; }
+    return true;
+  } catch {
+    alert("未能确认重命名结果，请刷新页面后重试");
+    return false;
+  }
+}
+
+// 先处理卡片内的操作按钮，避免触发整张卡片的学习操作。
 document.getElementById("batch-progress").addEventListener("click", async (ev) => {
+  const rename = ev.target.closest(".batch-rename");
+  if (rename) {
+    ev.stopPropagation();
+    if (rename.disabled) return;
+    const row = rename.closest(".batch-row");
+    rename.disabled = true;
+    try {
+      if (await renameBatch(row.dataset.batchId, row.querySelector(".batch-name").textContent)) {
+        await loadStatus();
+        document.querySelector(`[data-batch-id="${row.dataset.batchId}"] .batch-rename`)?.focus();
+      }
+    } finally {
+      rename.disabled = false;
+    }
+    return;
+  }
   const toggle = ev.target.closest(".order-toggle");
   if (toggle) {
     ev.stopPropagation();
@@ -336,6 +380,7 @@ function renderFinish(s) {
 
 const lib = { page: 1, q: "", tag: "", type: "", state: "", batch: "", sort: "added" };
 let lastItems = [];
+let libraryBatches = [];
 
 async function loadTagOptions() {
   const r = await (await fetch("/api/tags")).json();
@@ -351,6 +396,7 @@ async function loadTagOptions() {
 async function loadLibrary() {
   await loadTagOptions();
   const batches = await (await fetch("/api/batches")).json();
+  libraryBatches = batches.batches;
   document.getElementById("lib-batch").innerHTML = '<option value="">全部批次</option>' +
     batches.batches.map((b) => `<option value="${b.id}">${escapeHtml(b.name)}（${b.total}）</option>`).join("");
   document.getElementById("lib-batch").value = lib.batch;
@@ -455,18 +501,10 @@ document.getElementById("lib-search").addEventListener("input", (e) => {
 
 document.getElementById("btn-rename-batch").addEventListener("click", async () => {
   if (!lib.batch) return;
-  const name = prompt("输入新的批次名称：");
-  if (!name || !name.trim()) return;
-  const res = await fetch(`/api/batches/${lib.batch}`, {
-    method: "PUT", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name: name.trim() }),
-  });
-  if (!res.ok) {
-    const data = await res.json();
-    alert(data.error || "重命名失败");
-    return;
+  const batch = libraryBatches.find((b) => String(b.id) === lib.batch);
+  if (batch && await renameBatch(lib.batch, batch.name)) {
+    await loadLibrary();
   }
-  await loadLibrary();
 });
 
 const modal = document.getElementById("modal");
