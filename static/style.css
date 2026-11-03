@@ -169,6 +169,8 @@ body {
 .home-note { text-align: center; margin-top: 16px; color: var(--ink-soft); font-size: 14px; }
 
 /* 批次进度 */
+.batch-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0 12px; }
+.batch-toolbar h2 { font-size: 16px; }
 .batch-progress {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
@@ -760,9 +762,44 @@ body {
   font-size: 15px;
 }
 
+/* ---------- 批次导入 ---------- */
+.import-dialog {
+  width: min(960px, calc(100vw - 28px));
+  max-height: calc(100dvh - 32px);
+  margin: auto;
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--card);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.import-dialog::backdrop { background: rgba(0, 0, 0, 0.6); }
+.import-dialog h2 { font-size: 22px; margin-bottom: 10px; }
+.import-hint { font-size: 13px; color: var(--ink-soft); margin: 8px 0 14px; }
+.import-settings { display: grid; grid-template-columns: minmax(0, 1fr) 140px; gap: 16px; }
+.import-dialog select { width: 100%; padding: 9px 11px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--ink); font: inherit; }
+#import-raw-text { font-family: inherit; white-space: pre; tab-size: 4; }
+.import-table-wrap { max-height: 330px; overflow: auto; border: 1px solid var(--line); border-radius: 10px; }
+.import-table { width: 100%; min-width: 650px; border-collapse: collapse; font-size: 13px; }
+.import-table th { text-align: left; padding: 10px; background: var(--bg); position: sticky; top: 0; }
+.import-table td { padding: 8px; border-top: 1px solid var(--line); vertical-align: top; }
+.import-table input:not([type="checkbox"]) { width: 100%; min-width: 120px; padding: 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font: inherit; }
+.import-table input[type="checkbox"] { accent-color: var(--teal); margin: 8px; }
+.import-row-status { min-width: 100px; color: var(--ink-soft); }
+.import-row-invalid .import-row-status { color: var(--again); }
+.import-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px; margin-top: 18px; }
+.import-confirm { background: var(--teal); color: #fff; }
+.import-actions button:disabled { opacity: 0.5; cursor: default; }
+#import-message { margin-top: 12px; font-size: 14px; white-space: pre-line; }
+
 /* ---------- 响应式 ---------- */
 
 @media (max-width: 560px) {
+  .import-dialog { padding: 18px; }
+  .import-dialog h2 { font-size: 19px; }
+  .import-settings { grid-template-columns: minmax(0, 1fr); gap: 0; }
   .container { padding: 20px 14px 40px; }
   .topnav { padding: 8px 12px; gap: 8px; }
   .brand { font-size: 17px; }

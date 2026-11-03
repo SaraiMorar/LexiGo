@@ -609,6 +609,195 @@ document.getElementById("modal-save").addEventListener("click", async () => {
   }
 });
 
+// ---------- 粘贴表格导入批次 ----------
+
+const importDialog = document.getElementById("batch-import-dialog");
+let importRows = [];
+let importBusy = false;
+let importRevision = 0;
+let importedBatchId = null;
+
+function importKey(value) {
+  return value.normalize("NFKC").replace(/[‘’]/g, "'").toLowerCase().trim().replace(/\s+/g, " ");
+}
+
+function invalidateImportPreview() {
+  importRevision += 1;
+  importRows = [];
+  document.getElementById("import-preview").classList.add("hidden");
+  document.getElementById("import-confirm").disabled = true;
+  document.getElementById("import-message").textContent = "";
+}
+
+function openBatchImport() {
+  if (importBusy) return;
+  invalidateImportPreview();
+  importedBatchId = null;
+  const now = new Date();
+  const day = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  document.getElementById("import-batch-name").value = `${day} 课堂词组`;
+  document.getElementById("import-item-type").value = "phrase";
+  document.getElementById("import-raw-text").value = "";
+  document.getElementById("batch-import-fields").classList.remove("hidden");
+  document.getElementById("import-view-batch").classList.add("hidden");
+  document.getElementById("import-parse").classList.remove("hidden");
+  document.getElementById("import-confirm").classList.remove("hidden");
+  document.getElementById("import-close").textContent = "取消";
+  importDialog.showModal();
+  document.getElementById("import-raw-text").focus();
+}
+
+function setImportBusy(busy) {
+  importBusy = busy;
+  ["import-close", "import-parse", "import-batch-name", "import-item-type"].forEach((id) => {
+    document.getElementById(id).disabled = busy;
+  });
+  document.querySelectorAll("#import-preview-body input").forEach((input) => { input.disabled = busy; });
+  document.getElementById("import-confirm").disabled = busy;
+}
+
+function updateImportSummary() {
+  let selected = 0;
+  let invalid = 0;
+  const seen = new Set();
+  importRows.forEach((row, index) => {
+    const key = importKey(row.en);
+    let message = "待导入";
+    let bad = false;
+    if (!/[a-zA-Z]/.test(row.en)) { message = "请补全英文"; bad = true; }
+    else if (!row.zh.trim()) { message = "请补全中文释义"; bad = true; }
+    else if (row.en.length > 1000 || row.zh.length > 2000 || row.note.length > 4000) { message = "内容过长，请修正"; bad = true; }
+    else if (row.originalStatus === "existing" && key === row.originalKey) message = "词库已有，将跳过";
+    else if (seen.has(key)) message = "本次重复，将跳过";
+    if (row.selected) { selected += 1; invalid += Number(bad); seen.add(key); }
+    const tr = document.querySelector(`#import-preview-body tr[data-import-index="${index}"]`);
+    tr.classList.toggle("import-row-invalid", bad);
+    tr.querySelector(".import-row-status").textContent = message;
+  });
+  document.getElementById("import-summary").textContent = `识别到 ${importRows.length} 条，已选择 ${selected} 条${invalid ? `，其中 ${invalid} 条需要修正或取消勾选` : ""}。`;
+  document.getElementById("import-confirm").disabled = importBusy || selected === 0 || invalid > 0;
+}
+
+function renderImportPreview() {
+  document.getElementById("import-preview-body").innerHTML = importRows.map((row, index) => `
+    <tr data-import-index="${index}">
+      <td><input type="checkbox" data-field="selected" aria-label="导入第 ${index + 1} 条" ${row.selected ? "checked" : ""} /></td>
+      <td><input data-field="en" maxlength="1000" aria-label="第 ${index + 1} 条英文" value="${escapeHtml(row.en)}" /></td>
+      <td><input data-field="zh" maxlength="2000" aria-label="第 ${index + 1} 条中文" value="${escapeHtml(row.zh)}" /></td>
+      <td><input data-field="note" maxlength="4000" aria-label="第 ${index + 1} 条备注" value="${escapeHtml(row.note)}" /></td>
+      <td class="import-row-status"></td>
+    </tr>`).join("");
+  document.getElementById("import-preview").classList.remove("hidden");
+  updateImportSummary();
+}
+
+["btn-import-batch-home", "btn-import-batch-library"].forEach((id) => {
+  document.getElementById(id).addEventListener("click", openBatchImport);
+});
+document.getElementById("import-close").addEventListener("click", () => {
+  if (!importBusy) importDialog.close();
+});
+importDialog.addEventListener("cancel", (event) => { if (importBusy) event.preventDefault(); });
+document.getElementById("import-raw-text").addEventListener("input", invalidateImportPreview);
+document.getElementById("import-raw-text").addEventListener("paste", (event) => {
+  const html = event.clipboardData?.getData("text/html");
+  if (!html) return;
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const table = doc.querySelector("table");
+  if (!table) return;
+  const rows = Array.from(table.querySelectorAll("tr")).filter((row) => row.closest("table") === table);
+  const text = rows.map((row) => Array.from(row.cells).map((cell) => {
+    cell.querySelectorAll("br").forEach((br) => br.replaceWith(doc.createTextNode(" ")));
+    return cell.textContent.replace(/\s+/g, " ").trim();
+  }).join("\t")).join("\n");
+  if (!text.trim()) return;
+  event.preventDefault();
+  const input = event.target;
+  if (input.value.length - (input.selectionEnd - input.selectionStart) + text.length > input.maxLength) {
+    document.getElementById("import-message").textContent = "内容过长，请分批导入。";
+    return;
+  }
+  input.setRangeText(text, input.selectionStart, input.selectionEnd, "end");
+  invalidateImportPreview();
+});
+document.getElementById("import-preview-body").addEventListener("input", (event) => {
+  const input = event.target;
+  const tr = input.closest("tr[data-import-index]");
+  if (!tr || !input.dataset.field) return;
+  const row = importRows[Number(tr.dataset.importIndex)];
+  row[input.dataset.field] = input.type === "checkbox" ? input.checked : input.value;
+  updateImportSummary();
+});
+document.getElementById("import-parse").addEventListener("click", async () => {
+  if (importBusy) return;
+  const text = document.getElementById("import-raw-text").value;
+  invalidateImportPreview();
+  const revision = importRevision;
+  const message = document.getElementById("import-message");
+  setImportBusy(true);
+  message.textContent = "正在识别表格…";
+  try {
+    const res = await fetch("/api/batches/import/preview", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ text }),
+    });
+    const data = await res.json();
+    if (revision !== importRevision) return;
+    if (!res.ok) throw new Error(data.error || "识别失败，请检查内容");
+    importRows = data.rows.map((row) => ({ ...row, originalStatus: row.status,
+      originalKey: importKey(row.en), selected: !["existing", "duplicate"].includes(row.status) }));
+    message.textContent = data.headers_skipped ? `已跳过 ${data.headers_skipped} 行表头或分隔线。` : "";
+    renderImportPreview();
+  } catch (error) {
+    if (revision === importRevision) message.textContent = error.message || "识别失败，请重试";
+  } finally {
+    setImportBusy(false);
+    if (importRows.length) updateImportSummary();
+    else document.getElementById("import-confirm").disabled = true;
+  }
+});
+document.getElementById("import-confirm").addEventListener("click", async () => {
+  if (importBusy || !importRows.length) return;
+  const name = document.getElementById("import-batch-name").value.trim();
+  const message = document.getElementById("import-message");
+  if (!name) { message.textContent = "请先填写批次名称。"; return; }
+  const payload = { name, item_type: document.getElementById("import-item-type").value,
+    rows: importRows.filter((row) => row.selected).map(({ en, zh, note }) => ({ en, zh, note })) };
+  setImportBusy(true);
+  document.getElementById("import-raw-text").disabled = true;
+  message.textContent = "正在导入…";
+  try {
+    const res = await fetch("/api/batches/import", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "导入失败");
+    importedBatchId = data.batch_id;
+    message.textContent = `已创建「${data.name}」，新增 ${data.added} 条。${data.skipped_existing + data.skipped_duplicate ? `跳过 ${data.skipped_existing + data.skipped_duplicate} 条重复词条。` : ""}`;
+    ["batch-import-fields", "import-preview", "import-parse", "import-confirm"].forEach((id) => document.getElementById(id).classList.add("hidden"));
+    document.getElementById("import-close").textContent = "完成";
+    document.getElementById("import-view-batch").classList.remove("hidden");
+    lib.batch = String(data.batch_id);
+    lib.page = 1;
+    try {
+      await loadStatus();
+      if (!views.library.classList.contains("hidden")) await loadLibrary();
+    } catch {
+      message.textContent += "\n批次已保存，列表暂未刷新，请稍后刷新页面。";
+    }
+  } catch (error) {
+    message.textContent = error.message || "未能确认导入结果，请先查看批次列表后再重试。";
+  } finally {
+    setImportBusy(false);
+    document.getElementById("import-raw-text").disabled = false;
+    if (!importedBatchId) updateImportSummary();
+  }
+});
+document.getElementById("import-view-batch").addEventListener("click", () => {
+  if (!importedBatchId) return;
+  importDialog.close();
+  switchView("library");
+});
+
 // ---------- 导出 ----------
 
 document.getElementById("btn-export-csv").addEventListener("click", () => {

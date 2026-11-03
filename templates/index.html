@@ -72,6 +72,10 @@
       <button id="btn-start" class="btn-primary">开始学习</button>
       <p id="home-note" class="home-note"></p>
 
+      <div class="batch-toolbar">
+        <h2>我的批次</h2>
+        <button id="btn-import-batch-home" class="btn-small">＋ 导入批次</button>
+      </div>
       <div class="batch-progress" id="batch-progress"></div>
     </section>
 
@@ -107,6 +111,7 @@
           <option value="suspended">已搁置</option>
         </select>
         <button id="btn-add" class="btn-small">+ 加词</button>
+        <button id="btn-import-batch-library" class="btn-small">导入批次</button>
         <button id="btn-export-csv" class="btn-small">导出 CSV</button>
         <button id="btn-export-db" class="btn-small">备份数据库</button>
       </div>
@@ -292,6 +297,39 @@
       </div>
     </div>
   </div>
+
+  <dialog id="batch-import-dialog" class="import-dialog" aria-labelledby="batch-import-title">
+    <h2 id="batch-import-title">粘贴表格，导入一个新批次</h2>
+    <div id="batch-import-fields">
+      <p class="import-hint">复制老师发来的表格，直接粘贴在下面。支持 Excel、Word 表格、Markdown，以及每行一组的“英文 中文”。</p>
+      <div class="import-settings">
+        <div class="form-row"><label for="import-batch-name">批次名称</label><input id="import-batch-name" maxlength="100" placeholder="如 周三课堂词组" /></div>
+        <div class="form-row"><label for="import-item-type">词条类型</label><select id="import-item-type"><option value="phrase">词组</option><option value="word">单词</option><option value="sentence">句型</option></select></div>
+      </div>
+      <div class="form-row">
+        <label for="import-raw-text">表格原文</label>
+        <textarea id="import-raw-text" rows="7" maxlength="100000" placeholder="英文&#9;中文&#10;look after&#9;照顾&#10;be proud of&#9;为……自豪"></textarea>
+      </div>
+      <p class="import-hint">表头和序号会自动识别；先预览再导入。已有词条会跳过，保留原批次、释义和学习进度。每次最多 1000 条。</p>
+    </div>
+    <div id="import-preview" class="hidden">
+      <p id="import-summary" class="import-hint"></p>
+      <p class="import-hint">可以直接修正识别结果；取消勾选不需要导入的行。</p>
+      <div class="import-table-wrap">
+        <table class="import-table">
+          <thead><tr><th>导入</th><th>英文</th><th>中文释义</th><th>备注 / 例句</th><th>识别结果</th></tr></thead>
+          <tbody id="import-preview-body"></tbody>
+        </table>
+      </div>
+    </div>
+    <p id="import-message" role="status" aria-live="polite"></p>
+    <div class="import-actions">
+      <button id="import-close" class="btn-small">取消</button>
+      <button id="import-parse" class="btn-small">识别并预览</button>
+      <button id="import-confirm" class="btn-small import-confirm" disabled>确认导入</button>
+      <button id="import-view-batch" class="btn-small import-confirm hidden">查看新批次</button>
+    </div>
+  </dialog>
 
   <script src="{{ static_v('app.js') }}"></script>
 </body>

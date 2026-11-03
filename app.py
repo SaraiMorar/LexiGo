@@ -16,6 +16,7 @@ from functools import wraps
 from flask import Flask, jsonify, render_template, request, Response, send_file, url_for
 
 from lexigo import config, models
+from lexigo.batch_import import import_pasted_batch, preview_pasted_table
 from lexigo.db import get_conn, init_db
 from lexigo.importer import sync_from_csv
 from lexigo.session import STAGE_DONE, StudySession
@@ -184,6 +185,29 @@ def api_tags():
 @app.get("/api/batches")
 def api_batches():
     return jsonify({"batches": models.list_batches()})
+
+
+@app.post("/api/batches/import/preview")
+def api_batch_import_preview():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求格式不正确"}), 400
+    try:
+        return jsonify(preview_pasted_table(data.get("text")))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.post("/api/batches/import")
+def api_batch_import():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求格式不正确"}), 400
+    try:
+        return jsonify(import_pasted_batch(data.get("name"), data.get("rows"),
+                                          data.get("item_type", config.TYPE_PHRASE)))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
 
 @app.put("/api/batches/<int:batch_id>")
