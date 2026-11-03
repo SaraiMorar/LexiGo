@@ -32,6 +32,8 @@ def schedule(card, rating: int, today: date) -> dict:
     返回:
         新字段 dict
     """
+    if type(rating) is not int or rating not in (1, 2, 3, 4):
+        raise ValueError("评分须为 1–4 的整数")
     state = card["state"]
     ease = float(card["ease"])
     interval = int(card["interval_days"])

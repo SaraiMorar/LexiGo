@@ -2,6 +2,8 @@
 
 import sqlite3
 from contextlib import contextmanager
+from contextvars import ContextVar
+from uuid import uuid4
 
 from . import config
 
@@ -75,22 +77,32 @@ CREATE TABLE IF NOT EXISTS session_state (
     new_count     INTEGER NOT NULL DEFAULT 0,
     review_count  INTEGER NOT NULL DEFAULT 0,
     lapse_count   INTEGER NOT NULL DEFAULT 0,
+    version       TEXT NOT NULL DEFAULT '',
     started_at    TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_cards_due ON cards (due);
 CREATE INDEX IF NOT EXISTS idx_cards_state ON cards (state);
 CREATE INDEX IF NOT EXISTS idx_logs_time ON review_logs (reviewed_at);
+CREATE INDEX IF NOT EXISTS idx_logs_card_rating ON review_logs (card_id, rating);
 """
+
+
+_connection = ContextVar("lexigo_connection", default=None)
 
 
 @contextmanager
 def get_conn():
-    """获取数据库连接（行工厂为 sqlite3.Row），自动提交与关闭。"""
+    """嵌套调用复用同一事务，最外层负责提交、回滚与关闭。"""
+    existing = _connection.get()
+    if existing is not None:
+        yield existing
+        return
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(config.DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    token = _connection.set(conn)
     try:
         yield conn
         conn.commit()
@@ -98,6 +110,7 @@ def get_conn():
         conn.rollback()
         raise
     finally:
+        _connection.reset(token)
         conn.close()
 
 
@@ -107,6 +120,9 @@ def init_db():
         conn.executescript(SCHEMA)
         # 旧库 session_state 可能缺 session_type 列
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(session_state)")}
+        if "version" not in cols:
+            conn.execute("ALTER TABLE session_state ADD COLUMN version TEXT NOT NULL DEFAULT ''")
+        conn.execute("UPDATE session_state SET version = ? WHERE version = ''", (uuid4().hex,))
         if "session_type" not in cols:
             conn.execute(
                 "ALTER TABLE session_state ADD COLUMN session_type "

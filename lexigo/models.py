@@ -3,9 +3,25 @@
 import random
 import json
 from datetime import date, timedelta
+from uuid import uuid4
 
 from . import config
 from .db import get_conn
+
+
+# 任一方向仍未首次通过，且词条没有被搁置：算作未学完的新词。
+_UNFINISHED_NEW = """
+NOT EXISTS (SELECT 1 FROM cards blocked WHERE blocked.phrase_id = p.id AND blocked.state = 'suspended')
+AND EXISTS (
+    SELECT 1 FROM cards unfinished WHERE unfinished.phrase_id = p.id
+    AND (unfinished.state = 'new' OR (
+        unfinished.state = 'learning' AND NOT EXISTS (
+            SELECT 1 FROM review_logs passed
+            WHERE passed.card_id = unfinished.id AND passed.rating IN (3, 4)
+        )
+    ))
+)
+"""
 
 
 # ---------- 批次 ----------
@@ -82,18 +98,22 @@ def list_batches() -> list[dict]:
     """批次及进度：total 总词数，seen 至少学过一张，done 两卡都学完。"""
     with get_conn() as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT b.id, b.name, b.created_at, b.order_mode,
                    COUNT(p.id) AS total,
                    SUM(CASE WHEN p.not_new >= 1 THEN 1 ELSE 0 END) AS seen,
-                   SUM(CASE WHEN p.not_new = 2 THEN 1 ELSE 0 END) AS done
+                   SUM(CASE WHEN p.passed = 2 THEN 1 ELSE 0 END) AS done,
+                   SUM(CASE WHEN p.unfinished THEN 1 ELSE 0 END) AS new_waiting
             FROM batches b
             LEFT JOIN (
-                SELECT ph.id, ph.batch_id,
+                SELECT p.id, p.batch_id, ({_UNFINISHED_NEW}) AS unfinished,
                        SUM(CASE WHEN c.state != 'new' THEN 1 ELSE 0 END)
-                         AS not_new
-                FROM phrases ph JOIN cards c ON c.phrase_id = ph.id
-                GROUP BY ph.id
+                         AS not_new,
+                       SUM(CASE WHEN c.state IN ('review', 'mastered') OR EXISTS (
+                           SELECT 1 FROM review_logs l WHERE l.card_id = c.id AND l.rating IN (3, 4)
+                       ) THEN 1 ELSE 0 END) AS passed
+                FROM phrases p JOIN cards c ON c.phrase_id = p.id
+                GROUP BY p.id
             ) p ON p.batch_id = b.id
             GROUP BY b.id
             ORDER BY b.id
@@ -221,28 +241,30 @@ def delete_phrase(phrase_id: int):
             "INSERT OR IGNORE INTO deleted_phrases (en) SELECT en FROM phrases WHERE id = ?",
             (phrase_id,),
         )
-        # 正在学习时删除词条，也要清掉断点中对应的卡片，避免继续时访问空卡片。
-        ids = {r["id"] for r in conn.execute("SELECT id FROM cards WHERE phrase_id = ?", (phrase_id,))}
-        session = conn.execute("SELECT * FROM session_state WHERE id = 1").fetchone()
-        if session and ids:
-            queues = {key: [i for i in json.loads(session[key]) if i not in ids]
-                      for key in ("queue", "pending")}
-            snapshots = {key: {direction: [i for i in cards if i not in ids]
-                              for direction, cards in json.loads(session[key]).items()}
-                         for key in ("new_cards", "review_cards")}
-            counts = [max(0, session[count] - int(any(
-                i in ids for cards in json.loads(session[key]).values() for i in cards
-            ))) for key, count in (("new_cards", "new_count"), ("review_cards", "review_count"))]
-            conn.execute(
-                "UPDATE session_state SET queue=?, pending=?, new_cards=?, review_cards=?, "
-                "new_count=?, review_count=? WHERE id=1",
-                (*[json.dumps(value) for value in (*queues.values(), *snapshots.values())], *counts),
-            )
-        conn.execute(
-            "DELETE FROM review_logs WHERE phrase_id = ?", (phrase_id,)
-        )
+        _remove_from_session(conn, phrase_id)
+        conn.execute("DELETE FROM review_logs WHERE phrase_id = ?", (phrase_id,))
         conn.execute("DELETE FROM cards WHERE phrase_id = ?", (phrase_id,))
         conn.execute("DELETE FROM phrases WHERE id = ?", (phrase_id,))
+
+
+def _remove_from_session(conn, phrase_id: int):
+    """删除或搁置时，移除该词在当前会话所有阶段的卡片。"""
+    ids = {r["id"] for r in conn.execute("SELECT id FROM cards WHERE phrase_id = ?", (phrase_id,))}
+    session = conn.execute("SELECT * FROM session_state WHERE id = 1").fetchone()
+    if session and ids:
+        queues = {key: [i for i in json.loads(session[key]) if i not in ids]
+                  for key in ("queue", "pending")}
+        snapshots = {key: {direction: [i for i in cards if i not in ids]
+                          for direction, cards in json.loads(session[key]).items()}
+                     for key in ("new_cards", "review_cards")}
+        counts = [max(0, session[count] - int(any(
+            i in ids for cards in json.loads(session[key]).values() for i in cards
+        ))) for key, count in (("new_cards", "new_count"), ("review_cards", "review_count"))]
+        conn.execute(
+            "UPDATE session_state SET queue=?, pending=?, new_cards=?, review_cards=?, "
+            "new_count=?, review_count=?, version=? WHERE id=1",
+            (*[json.dumps(value) for value in (*queues.values(), *snapshots.values())], *counts, uuid4().hex),
+        )
 
 
 def suspend_phrase(phrase_id: int):
@@ -252,16 +274,18 @@ def suspend_phrase(phrase_id: int):
             "UPDATE cards SET state = ?, due = NULL WHERE phrase_id = ?",
             (config.STATE_SUSPENDED, phrase_id),
         )
+        _remove_from_session(conn, phrase_id)
 
 
 def resume_phrase(phrase_id: int, today_iso: str):
     """恢复复习：没学过回到 new；学过回到 review 并今天到期。"""
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, reps FROM cards WHERE phrase_id = ?", (phrase_id,)
+            "SELECT id, reps, last_rating FROM cards WHERE phrase_id = ? AND state = ?",
+            (phrase_id, config.STATE_SUSPENDED),
         ).fetchall()
         for row in rows:
-            if row["reps"] == 0:
+            if row["last_rating"] is None:
                 conn.execute(
                     "UPDATE cards SET state = ?, due = NULL WHERE id = ?",
                     (config.STATE_NEW, row["id"]),
@@ -269,7 +293,7 @@ def resume_phrase(phrase_id: int, today_iso: str):
             else:
                 conn.execute(
                     "UPDATE cards SET state = ?, due = ? WHERE id = ?",
-                    (config.STATE_REVIEW, today_iso, row["id"]),
+                    (config.STATE_REVIEW if row["reps"] else config.STATE_LEARNING, today_iso, row["id"]),
                 )
 
 
@@ -428,6 +452,16 @@ def get_phrase_card_ids(phrase_id: int) -> dict:
         return {r["direction"]: r["id"] for r in rows}
 
 
+def get_new_phrase_ids(batch_id: int | None = None) -> list[int]:
+    with get_conn() as conn:
+        sql = f"SELECT p.id FROM phrases p WHERE ({_UNFINISHED_NEW})"
+        params = []
+        if batch_id is not None:
+            sql += " AND p.batch_id = ?"
+            params.append(batch_id)
+        return [r["id"] for r in conn.execute(sql, params)]
+
+
 def get_new_card_ids(direction: str, batch_id: int | None = None) -> list[int]:
     """取某方向未学（new）卡 id，按各批次设置的 order_mode 排列。
 
@@ -441,9 +475,10 @@ def get_new_card_ids(direction: str, batch_id: int | None = None) -> list[int]:
         "FROM cards c\n"
         "JOIN phrases p ON p.id = c.phrase_id\n"
         "LEFT JOIN batches b ON b.id = p.batch_id\n"
-        "WHERE c.state = ? AND c.direction = ?\n"
+        "WHERE c.state IN (?, ?) AND c.direction = ?\n"
+        f"AND ({_UNFINISHED_NEW})\n"
     )
-    params: list = [config.ORDER_SEQUENCE, config.STATE_NEW, direction]
+    params: list = [config.ORDER_SEQUENCE, config.STATE_NEW, config.STATE_LEARNING, direction]
     if batch_id is not None:
         sql += "AND p.batch_id = ?\n"
         params.append(batch_id)
@@ -478,10 +513,12 @@ def get_due_review_phrase_ids(today_iso: str) -> list[int]:
     """
     with get_conn() as conn:
         rows = conn.execute(
-            """
-            SELECT DISTINCT phrase_id FROM cards
-            WHERE state IN (?, ?, ?) AND due IS NOT NULL AND due <= ?
-            ORDER BY phrase_id
+            f"""
+            SELECT DISTINCT c.phrase_id FROM cards c JOIN phrases p ON p.id = c.phrase_id
+            WHERE c.state IN (?, ?, ?) AND c.due IS NOT NULL AND c.due <= ?
+            AND NOT ({_UNFINISHED_NEW})
+            AND NOT EXISTS (SELECT 1 FROM cards blocked WHERE blocked.phrase_id = p.id AND blocked.state = 'suspended')
+            ORDER BY c.phrase_id
             """,
             (config.STATE_REVIEW, config.STATE_MASTERED,
              config.STATE_LEARNING, today_iso),

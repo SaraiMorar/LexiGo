@@ -23,6 +23,8 @@ const views = {
 
 let flipped = false;
 let cardShownAt = Date.now();
+let ratingPending = false;
+let studyState = null;
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) =>
@@ -92,9 +94,9 @@ function renderBatchProgress(batches) {
   }
   el.innerHTML = batches.map((b) => {
     const pct = b.total ? Math.round((b.done / b.total) * 100) : 0;
-    const finished = b.total > 0 && b.done >= b.total;
+    const finished = b.new_waiting === 0;
     const cls = finished ? "batch-row is-finished" : "batch-row clickable";
-    const hint = finished ? "该批次已学完" : "点击只学这个批次";
+    const hint = finished ? "没有待学新词；到期复习请点击开始学习" : "点击继续学习这个批次";
     const mode = b.order_mode || "sequence";
     return `
       <div class="${cls}" data-batch-id="${b.id}" title="${hint}">
@@ -163,11 +165,14 @@ document.getElementById("btn-exit-study").addEventListener("click", () => {
 
 function renderState(data) {
   if (data.done) {
+    studyState = null;
     renderFinish(data.summary);
     return;
   }
 
   const c = data.card;
+  studyState = data;
+  document.getElementById("study-error").textContent = "";
   flipped = false;
   cardShownAt = Date.now();
 
@@ -248,7 +253,7 @@ function renderState(data) {
 }
 
 function flipCard() {
-  if (flipped) return;
+  if (flipped || ratingPending || !studyState) return;
   flipped = true;
   document.getElementById("card-front").classList.add("hidden");
   document.getElementById("card-back").classList.remove("hidden");
@@ -257,15 +262,37 @@ function flipCard() {
 }
 
 async function submitRating(rating) {
-  if (!flipped) return;
+  if (!flipped || ratingPending || !studyState) return;
+  ratingPending = true;
+  const submitted = studyState;
+  const errorEl = document.getElementById("study-error");
+  errorEl.textContent = "";
+  document.querySelectorAll(".rate-btn").forEach((btn) => { btn.disabled = true; });
   const elapsedMs = Date.now() - cardShownAt;
-  const res = await fetch("/api/session/rate", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ rating, elapsed_ms: elapsedMs }),
-  });
-  const data = await res.json();
-  renderState(data);
+  try {
+    const res = await fetch("/api/session/rate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rating, elapsed_ms: elapsedMs,
+        card_id: submitted.card.card_id, version: submitted.version }),
+    });
+    const data = await res.json();
+    if (studyState !== submitted || views.study.classList.contains("hidden")) return;
+    if (res.status === 409) {
+      if (data.state) renderState(data.state);
+      errorEl.textContent = data.error;
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "评分失败，请重试");
+    renderState(data);
+  } catch (err) {
+    if (studyState === submitted && !views.study.classList.contains("hidden")) {
+      errorEl.textContent = err.message || "未能确认评分结果，请重试";
+    }
+  } finally {
+    ratingPending = false;
+    document.querySelectorAll(".rate-btn").forEach((btn) => { btn.disabled = false; });
+  }
 }
 
 document.querySelectorAll(".rate-btn").forEach((btn) => {
@@ -276,6 +303,7 @@ document.querySelectorAll(".rate-btn").forEach((btn) => {
 
 document.addEventListener("keydown", (e) => {
   if (views.study.classList.contains("hidden")) return;
+  if (e.repeat || e.target.closest("input, textarea, select, [contenteditable]")) return;
   if (e.code === "Space" || e.code === "Enter") {
     e.preventDefault();
     flipCard();

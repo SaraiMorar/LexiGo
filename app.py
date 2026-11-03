@@ -11,15 +11,32 @@ import os
 import threading
 import webbrowser
 from datetime import date, timedelta
+from functools import wraps
 
 from flask import Flask, jsonify, render_template, request, Response, send_file, url_for
 
 from lexigo import config, models
-from lexigo.db import init_db
+from lexigo.db import get_conn, init_db
 from lexigo.importer import sync_from_csv
 from lexigo.session import STAGE_DONE, StudySession
 
 app = Flask(__name__)
+
+
+def write_transaction(handler):
+    """会话读取、排期、日志和断点作为一个事务提交。"""
+    @wraps(handler)
+    def wrapped(*args, **kwargs):
+        with get_conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return handler(*args, **kwargs)
+    return wrapped
+
+
+def integer(value):
+    if type(value) not in (int, str):
+        raise ValueError("应为整数")
+    return int(value)
 
 
 @app.context_processor
@@ -59,7 +76,7 @@ def api_status():
     return jsonify(
         {
             "today": iso,
-            "new_waiting": len(models.get_new_card_ids(config.DIR_ZH2EN)),
+            "new_waiting": len(models.get_new_phrase_ids()),
             "review_due": len(models.get_due_review_phrase_ids(iso)),
             "session": session_info,
             "overall": models.get_overall_stats(),
@@ -70,9 +87,12 @@ def api_status():
 
 
 @app.post("/api/session/start")
+@write_transaction
 def api_start():
     data = request.get_json(silent=True)
     today = date.today()
+    if data is not None and not isinstance(data, dict):
+        return jsonify({"error": "请求格式不正确"}), 400
 
     # 主按钮不带请求体：意图是“继续当前未完成会话”，没有才全量新建，
     # 绝不把当前的批次会话误重建为全量。
@@ -87,26 +107,43 @@ def api_start():
     raw = data.get("batch_id")
     if raw is not None:
         try:
-            batch_id = int(raw)
+            batch_id = integer(raw)
         except (TypeError, ValueError):
             return jsonify({"error": "bad request"}), 400
     else:
         batch_id = None
+    if batch_id is not None and not any(b["id"] == batch_id for b in models.list_batches()):
+        return jsonify({"error": "批次不存在"}), 404
     sess = StudySession.get_or_create(today, batch_id)
     return jsonify(sess.current())
 
 
 @app.post("/api/session/rate")
+@write_transaction
 def api_rate():
     data = request.get_json(force=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求格式不正确"}), 400
     try:
-        rating = int(data.get("rating"))
-        elapsed_ms = int(data.get("elapsed_ms", 0))
+        rating = integer(data.get("rating"))
+        elapsed_ms = integer(data.get("elapsed_ms", 0))
+        card_id = integer(data["card_id"]) if "card_id" in data else None
     except (TypeError, ValueError):
         return jsonify({"error": "bad request"}), 400
+    if rating not in (1, 2, 3, 4) or not 0 <= elapsed_ms <= 2147483647:
+        return jsonify({"error": "评分须为 1–4，用时须为非负整数"}), 400
+    if "version" in data and (not isinstance(data["version"], str) or not data["version"]):
+        return jsonify({"error": "学习状态不正确"}), 400
     today = date.today()
     # 评分始终在当前会话上进行，不改变其批次范围；没有会话才新建
-    sess = StudySession.load() or StudySession.get_or_create(today)
+    sess = StudySession.load()
+    if sess is None and ("version" in data or card_id is not None):
+        return jsonify({"error": "学习状态已变化，请重新开始学习"}), 409
+    sess = sess or StudySession.get_or_create(today)
+    current = sess.current()
+    if (("version" in data and data["version"] != sess.version) or
+            (card_id is not None and (current["done"] or card_id != current["card"]["card_id"]))):
+        return jsonify({"error": "学习状态已变化，已刷新当前卡片，请重新翻面评分", "state": current}), 409
     return jsonify(sess.rate(rating, elapsed_ms, today))
 
 
@@ -115,6 +152,9 @@ def api_rate():
 def _phrase_payload(data) -> dict:
     """从请求体提取并校验词组字段。"""
     if not isinstance(data, dict):
+        return None
+    if any(value is not None and not isinstance(value, str) for key, value in data.items()
+           if key in ("en", "zh", "note", "tag", "item_type", "phonetic", "pos")):
         return None
     en = (data.get("en") or "").strip()
     zh = (data.get("zh") or "").strip()
@@ -164,7 +204,7 @@ def api_batch_rename(batch_id: int):
 @app.post("/api/batches/<int:batch_id>/order-mode")
 def api_batch_order_mode(batch_id: int):
     data = request.get_json(silent=True) or {}
-    order_mode = data.get("order_mode")
+    order_mode = data.get("order_mode") if isinstance(data, dict) else None
     if order_mode not in config.ORDER_MODES:
         return jsonify({"error": "bad request"}), 400
     ok = models.set_batch_order_mode(batch_id, order_mode)
@@ -316,8 +356,11 @@ def api_export_db():
 # ---------- 突击模式 ----------
 
 @app.post("/api/cram/start")
+@write_transaction
 def api_cram_start():
     data = request.get_json(force=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "请求格式不正确"}), 400
     try:
         limit = min(200, max(1, int(data.get("limit", 30))))
     except (TypeError, ValueError):

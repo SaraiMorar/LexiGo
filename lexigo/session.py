@@ -7,6 +7,7 @@
 
 import json
 from datetime import date, datetime, timedelta
+from uuid import uuid4
 
 from . import config, models, scheduler
 from .db import get_conn
@@ -44,6 +45,7 @@ class StudySession:
         self.review_count = row["review_count"]
         self.lapse_count = row["lapse_count"]
         self.started_at = row["started_at"]
+        self.version = row["version"]
 
     # ---------- 生命周期 ----------
 
@@ -59,8 +61,8 @@ class StudySession:
     def get_or_create(cls, today: date, batch_id: int | None = None) -> "StudySession":
         """显式选择目标（点具体批次，或全量）时，按该目标（重新）创建会话。
 
-        卡片评分已实时落库，重建不会丢已学：_create 只取 state='new' 的卡，
-        已学/在学的卡不会重新出现；shuffle 模式下每次重建都重新随机，
+        卡片评分已实时落库，重建会补上仍未首次通过的方向，
+        只取仍未通过的方向，已通过的方向不重复；shuffle 模式下每次重建都重新随机，
         满足“每次进入都重新随机”。
         主按钮“继续学习”走 load() 直接返回现有会话，不经过这里，断点不被打乱。
         """
@@ -70,7 +72,7 @@ class StudySession:
     def _create(cls, today: date, batch_id: int | None = None) -> "StudySession":
         iso = today.isoformat()
 
-        # 新词快照：会话创建时两个方向都还是 new。
+        # 新词快照：仅包含尚未通过的方向，也包含上次中断的错词。
         # 指定批次时只取该批次，否则取全部批次。
         new_zh2en = models.get_new_card_ids(config.DIR_ZH2EN, batch_id)
         new_en2zh = models.get_new_card_ids(config.DIR_EN2ZH, batch_id)
@@ -93,6 +95,8 @@ class StudySession:
 
         if new_zh2en:
             stage, queue = STAGE_NEW_ZH2EN, list(new_zh2en)
+        elif new_en2zh:
+            stage, queue = STAGE_NEW_EN2ZH, list(new_en2zh)
         elif review_cards[config.DIR_ZH2EN]:
             stage, queue = STAGE_REVIEW_ZH2EN, list(review_cards[config.DIR_ZH2EN])
         else:
@@ -104,12 +108,13 @@ class StudySession:
                 """INSERT INTO session_state
                    (id, session_date, session_type, batch_id, stage, queue,
                     pending, new_cards, review_cards, new_count, review_count,
-                    lapse_count)
-                   VALUES (1, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 0)""",
+                    lapse_count, version)
+                   VALUES (1, ?, ?, ?, ?, ?, '[]', ?, ?, ?, ?, 0, ?)""",
                 (
                     iso, session_type, batch_id, stage, json.dumps(queue),
                     json.dumps(new_cards), json.dumps(review_cards),
-                    len(new_zh2en), len(review_cards[config.DIR_ZH2EN]),
+                    len(models.get_new_phrase_ids(batch_id)),
+                    len(review_cards[config.DIR_ZH2EN]), uuid4().hex,
                 ),
             )
         return cls.load()
@@ -134,11 +139,11 @@ class StudySession:
                 """INSERT INTO session_state
                    (id, session_date, session_type, stage, queue, pending,
                     new_cards, review_cards, new_count, review_count,
-                    lapse_count)
-                   VALUES (1, ?, 'cram', ?, ?, '[]', '{}', ?, 0, ?, 0)""",
+                    lapse_count, version)
+                   VALUES (1, ?, 'cram', ?, ?, '[]', '{}', ?, 0, ?, 0, ?)""",
                 (iso, stage, json.dumps(queue),
                  json.dumps(review_cards),
-                 len(review_cards[config.DIR_ZH2EN])),
+                 len(review_cards[config.DIR_ZH2EN]), uuid4().hex),
             )
         return cls.load()
 
@@ -148,12 +153,12 @@ class StudySession:
                 """UPDATE session_state SET session_type = ?, stage = ?,
                        queue = ?, pending = ?, new_cards = ?,
                        review_cards = ?, new_count = ?, review_count = ?,
-                       lapse_count = ? WHERE id = 1""",
+                       lapse_count = ?, version = ? WHERE id = 1""",
                 (
                     self.session_type, self.stage,
                     json.dumps(self.queue), json.dumps(self.pending),
                     json.dumps(self.new_cards), json.dumps(self.review_cards),
-                    self.new_count, self.review_count, self.lapse_count,
+                    self.new_count, self.review_count, self.lapse_count, self.version,
                 ),
             )
 
@@ -197,12 +202,21 @@ class StudySession:
         if self.stage == STAGE_DONE:
             return {"done": True, "summary": self._summary()}
         card = models.get_card(self.queue[0])
-        base_total = (self.new_count + self.review_count) * 2
-        rated_count = models.get_today_log_count(self.session_date)
+        base_total = sum(len(ids) for cards in (self.new_cards, self.review_cards) for ids in cards.values())
+        remaining = set(self.queue + self.pending)
+        if self.stage == STAGE_NEW_ZH2EN:
+            remaining.update(self.new_cards.get(config.DIR_EN2ZH, []))
+        if self.stage in (STAGE_NEW_ZH2EN, STAGE_NEW_EN2ZH, STAGE_NEW_RELEARN):
+            for ids in self.review_cards.values():
+                remaining.update(ids)
+        elif self.stage == STAGE_REVIEW_ZH2EN:
+            remaining.update(self.review_cards.get(config.DIR_EN2ZH, []))
+        rated_count = max(0, base_total - len(remaining))
         return {
             "done": False,
             "session_type": self.session_type,
             "batch_id": self.batch_id,
+            "version": self.version,
             "stage": self.stage,
             "stage_label": STAGE_LABELS[self.stage],
             "card": {
@@ -224,6 +238,8 @@ class StudySession:
         }
 
     def rate(self, rating: int, elapsed_ms: int, today: date) -> dict:
+        if type(rating) is not int or rating not in (1, 2, 3, 4) or type(elapsed_ms) is not int or elapsed_ms < 0:
+            raise ValueError("评分或用时不正确")
         self._advance()
         if self.stage == STAGE_DONE:
             self.save()
@@ -249,14 +265,16 @@ class StudySession:
             if rating in (config.RATING_AGAIN, config.RATING_HARD):
                 self.pending.append(card_id)
         elif self.stage in (STAGE_REVIEW_ZH2EN, STAGE_REVIEW_EN2ZH):
-            # 复习：只有 Again 进重做篮
-            if rating == config.RATING_AGAIN:
+            # 复习中的 Hard 可通过，但遗忘后仍在 learning 的卡必须继续重做。
+            if (rating == config.RATING_AGAIN or
+                    (rating == config.RATING_HARD and fields["state"] == config.STATE_LEARNING)):
                 self.pending.append(card_id)
         else:
             # 错词循环：Again/Hard 重新排到队尾
             if rating in (config.RATING_AGAIN, config.RATING_HARD):
                 self.queue.append(card_id)
 
+        self.version = uuid4().hex
         self.save()
         return self.current()
 

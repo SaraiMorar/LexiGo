@@ -177,12 +177,14 @@ class LibraryTests(unittest.TestCase):
                 source.backup(target)
             before = {table: source.execute(f"SELECT * FROM {table}").fetchall()
                       for table in ("phrases", "cards", "review_logs", "session_state", "batches")}
+            columns = {table: ", ".join(r[1] for r in source.execute(f"PRAGMA table_info({table})"))
+                       for table in before}
         init_db()
         sync_from_csv()
         sync_from_csv()
         with sqlite3.connect(config.DB_PATH) as conn:
             for table, records in before.items():
-                self.assertEqual(conn.execute(f"SELECT * FROM {table}").fetchall(), records, table)
+                self.assertEqual(conn.execute(f"SELECT {columns[table]} FROM {table}").fetchall(), records, table)
             self.assertEqual(conn.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertEqual(models.list_phrases()["total"], 1526)
         self.assertEqual(self.client.get("/").status_code, 200)
